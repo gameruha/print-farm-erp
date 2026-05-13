@@ -864,3 +864,8 @@ tr:hover td {
     grid-template-columns: 1fr;
   }
 }
+
+.period-btn:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.28);
+  outline-offset: 2px;
+}

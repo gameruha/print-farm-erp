@@ -754,7 +754,7 @@ export default function App() {
                   <div><h2 className="panel-title">Finance Report</h2><p className="panel-subtitle">Revenue, production cost, expenses and profitability by period.</p></div>
                   <div className="finance-filters">
                     {[['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['all', 'All time'], ['custom', 'Custom']].map(([key, label]) => (
-                      <button key={key} className={`period-btn ${financePeriod === key ? 'active' : ''}`} onClick={() => setFinancePeriod(key)} type="button">{label}</button>
+                      <button key={key} aria-pressed={financePeriod === key} className={`period-btn ${financePeriod === key ? 'active' : ''}`} onClick={() => setFinancePeriod(key)} type="button">{label}</button>
                     ))}
                   </div>
                 </div>
