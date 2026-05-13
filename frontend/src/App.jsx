@@ -101,6 +101,59 @@ function formatInputDateTime(value) {
   return String(value).replace(' ', 'T').slice(0, 16);
 }
 
+
+function parseDateOnly(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function endOfDay(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(23, 59, 59, 999);
+  return date;
+}
+
+function getFinancePeriodRange(period, customFrom, customTo) {
+  if (period === 'all') return { start: null, end: null };
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(today);
+  end.setHours(23, 59, 59, 999);
+  const start = new Date(today);
+
+  if (period === 'week') {
+    const day = start.getDay() || 7;
+    start.setDate(start.getDate() - day + 1);
+  } else if (period === 'month') {
+    start.setDate(1);
+  } else if (period === 'custom') {
+    return { start: parseDateOnly(customFrom), end: endOfDay(customTo) };
+  }
+
+  return { start, end };
+}
+
+function isWithinRange(value, range) {
+  const date = parseDateOnly(value);
+  if (!date) return !range.start && !range.end;
+  if (range.start && date < range.start) return false;
+  if (range.end && date > range.end) return false;
+  return true;
+}
+
+function getValueTone(value) {
+  const num = Number(value || 0);
+  if (num > 0) return 'finance-positive';
+  if (num < 0) return 'finance-negative';
+  return 'finance-neutral';
+}
+
 function getStatusBadge(status) {
   const s = String(status || '').toLowerCase();
   if (['done', 'ready', 'completed', 'paid', 'success', 'delivered', 'shipped'].includes(s)) return 'badge badge-green';
@@ -198,6 +251,9 @@ export default function App() {
   const [printJobs, setPrintJobs] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [search, setSearch] = useState('');
+  const [financePeriod, setFinancePeriod] = useState('all');
+  const [financeFrom, setFinanceFrom] = useState('');
+  const [financeTo, setFinanceTo] = useState('');
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState({ type: '', text: '' });
 
@@ -309,12 +365,19 @@ export default function App() {
   const activeOrders = useMemo(() => orders.filter((item) => !['ready', 'shipped', 'completed', 'cancelled'].includes(String(item.status || '').toLowerCase())).length, [orders]);
   const lowMaterials = useMemo(() => materials.filter((item) => Number(item.current_stock ?? item.quantity ?? 0) <= Number(item.min_stock ?? item.min_stock_qty ?? 0)).length, [materials]);
   const runningJobs = useMemo(() => printJobs.filter((job) => ['queued', 'running', 'printing'].includes(String(job.status || '').toLowerCase())).length, [printJobs]);
+  const financeRange = useMemo(() => getFinancePeriodRange(financePeriod, financeFrom, financeTo), [financeFrom, financePeriod, financeTo]);
+  const filteredFinanceRows = useMemo(() => orderFinanceRows.filter(({ order }) => isWithinRange(order.order_date || order.created_at, financeRange)), [financeRange, orderFinanceRows]);
+  const filteredExpenses = useMemo(() => expenses.filter((expense) => isWithinRange(expense.expense_date, financeRange)), [expenses, financeRange]);
+  const filteredCompletedJobs = useMemo(() => printJobs.filter((job) => {
+    const status = String(job.status || '').toLowerCase();
+    return ['done', 'completed'].includes(status) && isWithinRange(job.end_time || job.start_time, financeRange);
+  }), [financeRange, printJobs]);
   const financeSummary = useMemo(() => {
-    const totalRevenue = orderFinanceRows.reduce((sum, row) => sum + row.revenue, 0);
-    const totalProductionCost = orderFinanceRows.reduce((sum, row) => sum + row.productionCost, 0);
+    const totalRevenue = filteredFinanceRows.reduce((sum, row) => sum + row.revenue, 0);
+    const totalProductionCost = filteredFinanceRows.reduce((sum, row) => sum + row.productionCost, 0);
     const totalProfit = totalRevenue - totalProductionCost;
-    const expenseTotal = expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
-    const expensesByType = expenses.reduce((acc, expense) => {
+    const expenseTotal = filteredExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+    const expensesByType = filteredExpenses.reduce((acc, expense) => {
       const key = expense.expense_type_id ? `Type #${expense.expense_type_id}` : 'Other';
       acc[key] = (acc[key] || 0) + Number(expense.amount || 0);
       return acc;
@@ -328,8 +391,16 @@ export default function App() {
       expenseTotal,
       netProfit: totalProfit - expenseTotal,
       expensesByType,
+      orderCount: filteredFinanceRows.length,
+      completedJobs: filteredCompletedJobs.length,
     };
-  }, [expenses, orderFinanceRows]);
+  }, [filteredCompletedJobs.length, filteredExpenses, filteredFinanceRows]);
+  const financeReportRows = useMemo(() => filteredFinanceRows.map((row) => {
+    const allocatedExpenses = financeSummary.totalRevenue > 0
+      ? (row.revenue / financeSummary.totalRevenue) * financeSummary.expenseTotal
+      : 0;
+    return { ...row, allocatedExpenses, netProfit: row.profit - allocatedExpenses };
+  }), [filteredFinanceRows, financeSummary.expenseTotal, financeSummary.totalRevenue]);
 
   const dashboardAlerts = useMemo(() => {
     const alerts = [];
@@ -657,7 +728,7 @@ export default function App() {
                 <div className="table-wrap"><table><thead><tr><th>Order</th><th>Client</th><th>Status</th><th>Revenue</th><th>Production Cost</th><th>Profit</th><th>Margin</th><th>Actions</th></tr></thead><tbody>
                   {filteredOrders.map((item) => {
                     const finance = financeByOrderId.get(String(item.order_id)) || calculateOrderFinance(item, availableOrderItems, printJobs);
-                    return <tr key={item.order_id}><td><strong>#{item.order_id}</strong><span>{item.source_name || item.order_number || formatDate(item.order_date || item.created_at)}</span></td><td>Client #{item.client_id ?? '—'}</td><td><span className={getStatusBadge(item.status)}>{item.status || 'new'}</span><span>{item.payment_status || 'unpaid'}</span></td><td>{formatMoney(finance.revenue)}</td><td>{formatMoney(finance.productionCost)}</td><td><span className={finance.profit >= 0 ? 'finance-positive' : 'finance-negative'}>{formatMoney(finance.profit)}</span></td><td>{formatPercent(finance.margin)}</td><td><div className="row-actions"><button className="inline-action" onClick={() => openOrderItemModal(String(item.order_id))}>Add item</button><button className="inline-action" onClick={() => openOrderModal(item)}>Edit</button><button className="inline-action danger" onClick={() => askDelete('order', '/orders', item.order_id, `Order #${item.order_id}`)}>Delete</button></div></td></tr>;
+                    return <tr key={item.order_id}><td><strong>#{item.order_id}</strong><span>{item.source_name || item.order_number || formatDate(item.order_date || item.created_at)}</span></td><td>Client #{item.client_id ?? '—'}</td><td><span className={getStatusBadge(item.status)}>{item.status || 'new'}</span><span>{item.payment_status || 'unpaid'}</span></td><td>{formatMoney(finance.revenue)}</td><td>{formatMoney(finance.productionCost)}</td><td><span className={getValueTone(finance.profit)}>{formatMoney(finance.profit)}</span></td><td><span className={getValueTone(finance.margin)}>{formatPercent(finance.margin)}</span></td><td><div className="row-actions"><button className="inline-action" onClick={() => openOrderItemModal(String(item.order_id))}>Add item</button><button className="inline-action" onClick={() => openOrderModal(item)}>Edit</button><button className="inline-action danger" onClick={() => askDelete('order', '/orders', item.order_id, `Order #${item.order_id}`)}>Delete</button></div></td></tr>;
                   })}
                 </tbody></table>{filteredOrders.length === 0 && <div className="empty">No orders match your search.</div>}</div>
 
@@ -678,10 +749,33 @@ export default function App() {
             )}
 
             {!loading && tab === 'finance' && (
-              <section className="panel">
-                <div className="panel-head"><div><h2 className="panel-title">Finance Overview</h2><p className="panel-subtitle">Simple project-level cost and revenue indicators.</p></div></div>
-                <div className="kpi-row"><div className="kpi-box"><h4>Total Revenue</h4><p>{formatMoney(financeSummary.totalRevenue)}</p></div><div className="kpi-box"><h4>Production Cost</h4><p>{formatMoney(financeSummary.totalProductionCost)}</p></div><div className="kpi-box"><h4>Total Profit</h4><p>{formatMoney(financeSummary.totalProfit)}</p></div><div className="kpi-box"><h4>Average Margin</h4><p>{formatPercent(financeSummary.averageMargin)}</p></div></div>
-                <div className="finance-grid"><div className="mini-card"><h4>Expenses</h4><p className="metric">{formatMoney(financeSummary.expenseTotal)}</p><p className="muted">Loaded from existing expenses data when available.</p></div><div className="mini-card"><h4>Profit After Expenses</h4><p className="metric">{formatMoney(financeSummary.netProfit)}</p><p className="muted">Total profit minus recorded expenses.</p></div></div>
+              <section className="panel finance-report">
+                <div className="panel-head">
+                  <div><h2 className="panel-title">Finance Report</h2><p className="panel-subtitle">Revenue, production cost, expenses and profitability by period.</p></div>
+                  <div className="finance-filters">
+                    {[['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['all', 'All time'], ['custom', 'Custom']].map(([key, label]) => (
+                      <button key={key} className={`period-btn ${financePeriod === key ? 'active' : ''}`} onClick={() => setFinancePeriod(key)} type="button">{label}</button>
+                    ))}
+                  </div>
+                </div>
+                {financePeriod === 'custom' && <div className="custom-range"><Field label="From"><input className="form-input" type="date" value={financeFrom} onChange={(e) => setFinanceFrom(e.target.value)} /></Field><Field label="To"><input className="form-input" type="date" value={financeTo} onChange={(e) => setFinanceTo(e.target.value)} /></Field></div>}
+
+                <div className="finance-metrics">
+                  <div className="kpi-box"><h4>Total Revenue</h4><p>{formatMoney(financeSummary.totalRevenue)}</p></div>
+                  <div className="kpi-box"><h4>Production Cost</h4><p>{formatMoney(financeSummary.totalProductionCost)}</p></div>
+                  <div className="kpi-box"><h4>Recorded Expenses</h4><p>{formatMoney(financeSummary.expenseTotal)}</p></div>
+                  <div className="kpi-box"><h4>Net Profit Before Expenses</h4><p className={getValueTone(financeSummary.totalProfit)}>{formatMoney(financeSummary.totalProfit)}</p></div>
+                  <div className="kpi-box"><h4>Net Profit After Expenses</h4><p className={getValueTone(financeSummary.netProfit)}>{formatMoney(financeSummary.netProfit)}</p></div>
+                  <div className="kpi-box"><h4>Average Margin</h4><p>{formatPercent(financeSummary.averageMargin)}</p></div>
+                  <div className="kpi-box"><h4>Orders</h4><p>{financeSummary.orderCount}</p></div>
+                  <div className="kpi-box"><h4>Completed Print Jobs</h4><p>{financeSummary.completedJobs}</p></div>
+                </div>
+
+                <div className="subsection-head"><h3>Order Profitability</h3><span className="muted">Expenses are allocated by revenue share for report visibility.</span></div>
+                <div className="table-wrap finance-table"><table><thead><tr><th>Order ID</th><th>Date</th><th>Revenue</th><th>Production Cost</th><th>Expenses</th><th>Profit</th><th>Margin %</th></tr></thead><tbody>
+                  {financeReportRows.map((row) => <tr key={row.order.order_id}><td><strong>#{row.order.order_id}</strong></td><td>{formatDate(row.order.order_date || row.order.created_at)}</td><td>{formatMoney(row.revenue)}</td><td>{formatMoney(row.productionCost)}</td><td>{formatMoney(row.allocatedExpenses)}</td><td><span className={getValueTone(row.netProfit)}>{formatMoney(row.netProfit)}</span></td><td><span className={getValueTone(row.margin)}>{formatPercent(row.margin)}</span></td></tr>)}
+                </tbody></table>{financeReportRows.length === 0 && <div className="empty">No finance rows for this period yet. Values are shown as {formatMoney(0)}.</div>}</div>
+
                 {Object.keys(financeSummary.expensesByType).length > 0 && <div className="table-wrap finance-expenses"><table><thead><tr><th>Expense Type</th><th>Amount</th></tr></thead><tbody>{Object.entries(financeSummary.expensesByType).map(([type, amount]) => <tr key={type}><td>{type}</td><td>{formatMoney(amount)}</td></tr>)}</tbody></table></div>}
                 <p className="footer-note">Finance uses existing orders → order_items → print_jobs relationships and falls back to planned/actual item cost when no print job cost exists.</p>
               </section>
