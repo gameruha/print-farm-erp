@@ -101,6 +101,59 @@ function formatInputDateTime(value) {
   return String(value).replace(' ', 'T').slice(0, 16);
 }
 
+
+function parseDateOnly(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function endOfDay(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(23, 59, 59, 999);
+  return date;
+}
+
+function getFinancePeriodRange(period, customFrom, customTo) {
+  if (period === 'all') return { start: null, end: null };
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(today);
+  end.setHours(23, 59, 59, 999);
+  const start = new Date(today);
+
+  if (period === 'week') {
+    const day = start.getDay() || 7;
+    start.setDate(start.getDate() - day + 1);
+  } else if (period === 'month') {
+    start.setDate(1);
+  } else if (period === 'custom') {
+    return { start: parseDateOnly(customFrom), end: endOfDay(customTo) };
+  }
+
+  return { start, end };
+}
+
+function isWithinRange(value, range) {
+  const date = parseDateOnly(value);
+  if (!date) return !range.start && !range.end;
+  if (range.start && date < range.start) return false;
+  if (range.end && date > range.end) return false;
+  return true;
+}
+
+function getValueTone(value) {
+  const num = Number(value || 0);
+  if (num > 0) return 'finance-positive';
+  if (num < 0) return 'finance-negative';
+  return 'finance-neutral';
+}
+
 function getStatusBadge(status) {
   const s = String(status || '').toLowerCase();
   if (['done', 'ready', 'completed', 'paid', 'success', 'delivered', 'shipped'].includes(s)) return 'badge badge-green';
@@ -134,6 +187,32 @@ function copyFields(source, defaults, formatters = {}) {
       return [key, formatters[key] ? formatters[key](value) : String(value ?? '')];
     })
   );
+}
+
+
+function calculateOrderFinance(order, allOrderItems, allPrintJobs) {
+  const items = allOrderItems.filter((item) => String(item.order_id) === String(order.order_id));
+  const itemIds = new Set(items.map((item) => String(item.item_id)));
+  const jobs = allPrintJobs.filter((job) => itemIds.has(String(job.item_id)));
+
+  const itemRevenue = items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.planned_unit_price || 0), 0);
+  const discount = Number(order.discount_amount || 0);
+  const revenue = Math.max(0, itemRevenue - discount);
+  const productionCost = items.reduce((sum, item) => {
+    const itemJobs = jobs.filter((job) => String(job.item_id) === String(item.item_id));
+    const printJobCost = itemJobs.reduce((jobSum, job) => jobSum + Number(job.total_cost || 0), 0);
+    const fallbackUnitCost = Number(item.actual_unit_cost ?? item.planned_unit_cost ?? 0);
+    const fallbackCost = Number(item.quantity || 0) * fallbackUnitCost;
+    return sum + (printJobCost > 0 ? printJobCost : fallbackCost);
+  }, 0);
+  const profit = revenue - productionCost;
+  const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
+
+  return { revenue, productionCost, profit, margin, itemCount: items.length, jobCount: jobs.length };
+}
+
+function formatPercent(value) {
+  return `${Number(value || 0).toFixed(1)}%`;
 }
 
 function Field({ children, className = '', label, hint }) {
@@ -170,7 +249,11 @@ export default function App() {
   const [variants, setVariants] = useState([]);
   const [orderItems, setOrderItems] = useState([]);
   const [printJobs, setPrintJobs] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [search, setSearch] = useState('');
+  const [financePeriod, setFinancePeriod] = useState('all');
+  const [financeFrom, setFinanceFrom] = useState('');
+  const [financeTo, setFinanceTo] = useState('');
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState({ type: '', text: '' });
 
@@ -184,6 +267,7 @@ export default function App() {
   const [editingProductId, setEditingProductId] = useState(null);
   const [editingOrderId, setEditingOrderId] = useState(null);
   const [editingMaterialId, setEditingMaterialId] = useState(null);
+  const [editingOrderItemId, setEditingOrderItemId] = useState(null);
   const [editingPrintJobId, setEditingPrintJobId] = useState(null);
 
   const [productForm, setProductForm] = useState(defaultProductForm);
@@ -206,14 +290,15 @@ export default function App() {
   const loadAllData = useCallback(async () => {
     setLoading(true);
     try {
-      const [productsData, printersData, ordersData, materialsData, variantsData, orderItemsData, printJobsData] = await Promise.all([
+      const [productsData, printersData, ordersData, materialsData, variantsData, orderItemsData, printJobsData, expensesData] = await Promise.all([
         fetchOptional('/products'),
         fetchOptional('/printers'),
         fetchOptional('/orders'),
         fetchOptional('/materials'),
         fetchOptional('/product-variants'),
-        fetchOptional('/order-items'),
+        fetchOptional('/order-items').then((items) => (items.length > 0 ? items : fetchOptional('/order_items'))),
         fetchOptional('/print-jobs'),
+        fetchOptional('/expenses'),
       ]);
 
       setProducts(productsData);
@@ -223,6 +308,7 @@ export default function App() {
       setVariants(variantsData);
       setOrderItems(orderItemsData);
       setPrintJobs(printJobsData);
+      setExpenses(expensesData);
     } catch (error) {
       console.error('Load error:', error);
       setMessage({ type: 'error', text: 'Could not load data from backend.' });
@@ -269,12 +355,61 @@ export default function App() {
   const filteredMaterials = useMemo(() => materials.filter((item) => [item.material_name, item.material_type, item.brand, item.sku].join(' ').toLowerCase().includes(search.toLowerCase())), [materials, search]);
   const filteredPrintJobs = useMemo(() => printJobs.filter((job) => [job.job_id, job.item_id, job.printer_id, job.status, job.bambu_job_code].join(' ').toLowerCase().includes(search.toLowerCase())), [printJobs, search]);
 
+  const orderFinanceRows = useMemo(() => orders.map((order) => ({
+    order,
+    ...calculateOrderFinance(order, availableOrderItems, printJobs),
+  })), [availableOrderItems, orders, printJobs]);
+  const financeByOrderId = useMemo(() => new Map(orderFinanceRows.map((row) => [String(row.order.order_id), row])), [orderFinanceRows]);
   const totalProductValue = useMemo(() => products.reduce((sum, item) => sum + Number(item.base_price || 0), 0), [products]);
   const totalWearPerHour = useMemo(() => printers.reduce((sum, item) => sum + Number(item.wear_per_hour || 0), 0), [printers]);
   const activeOrders = useMemo(() => orders.filter((item) => !['ready', 'shipped', 'completed', 'cancelled'].includes(String(item.status || '').toLowerCase())).length, [orders]);
   const lowMaterials = useMemo(() => materials.filter((item) => Number(item.current_stock ?? item.quantity ?? 0) <= Number(item.min_stock ?? item.min_stock_qty ?? 0)).length, [materials]);
-  const plannedRevenue = useMemo(() => orderItems.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.planned_unit_price || 0), 0), [orderItems]);
   const runningJobs = useMemo(() => printJobs.filter((job) => ['queued', 'running', 'printing'].includes(String(job.status || '').toLowerCase())).length, [printJobs]);
+  const financeRange = useMemo(() => getFinancePeriodRange(financePeriod, financeFrom, financeTo), [financeFrom, financePeriod, financeTo]);
+  const filteredFinanceRows = useMemo(() => orderFinanceRows.filter(({ order }) => isWithinRange(order.order_date || order.created_at, financeRange)), [financeRange, orderFinanceRows]);
+  const filteredExpenses = useMemo(() => expenses.filter((expense) => isWithinRange(expense.expense_date, financeRange)), [expenses, financeRange]);
+  const filteredCompletedJobs = useMemo(() => printJobs.filter((job) => {
+    const status = String(job.status || '').toLowerCase();
+    return ['done', 'completed'].includes(status) && isWithinRange(job.end_time || job.start_time, financeRange);
+  }), [financeRange, printJobs]);
+  const financeSummary = useMemo(() => {
+    const totalRevenue = filteredFinanceRows.reduce((sum, row) => sum + row.revenue, 0);
+    const totalProductionCost = filteredFinanceRows.reduce((sum, row) => sum + row.productionCost, 0);
+    const totalProfit = totalRevenue - totalProductionCost;
+    const expenseTotal = filteredExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+    const expensesByType = filteredExpenses.reduce((acc, expense) => {
+      const key = expense.expense_type_id ? `Type #${expense.expense_type_id}` : 'Other';
+      acc[key] = (acc[key] || 0) + Number(expense.amount || 0);
+      return acc;
+    }, {});
+
+    return {
+      totalRevenue,
+      totalProductionCost,
+      totalProfit,
+      averageMargin: totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0,
+      expenseTotal,
+      netProfit: totalProfit - expenseTotal,
+      expensesByType,
+      orderCount: filteredFinanceRows.length,
+      completedJobs: filteredCompletedJobs.length,
+    };
+  }, [filteredCompletedJobs.length, filteredExpenses, filteredFinanceRows]);
+  const financeReportRows = useMemo(() => filteredFinanceRows.map((row) => {
+    const allocatedExpenses = financeSummary.totalRevenue > 0
+      ? (row.revenue / financeSummary.totalRevenue) * financeSummary.expenseTotal
+      : 0;
+    return { ...row, allocatedExpenses, netProfit: row.profit - allocatedExpenses };
+  }), [filteredFinanceRows, financeSummary.expenseTotal, financeSummary.totalRevenue]);
+  const financePeriodLabel = useMemo(() => {
+    if (financePeriod === 'all') return 'All time';
+    if (financePeriod === 'custom') {
+      const from = financeFrom || 'start';
+      const to = financeTo || 'today';
+      return `Custom range: ${from} → ${to}`;
+    }
+    return financePeriod === 'today' ? 'Today' : financePeriod === 'week' ? 'This week' : 'This month';
+  }, [financeFrom, financePeriod, financeTo]);
 
   const dashboardAlerts = useMemo(() => {
     const alerts = [];
@@ -327,13 +462,23 @@ export default function App() {
     setShowMaterialModal(true);
   }
 
-  function openOrderItemModal(orderId = '') {
-    setOrderItemForm((prev) => ({
-      ...prev,
-      order_id: orderId || prev.order_id || String(orders[0]?.order_id || ''),
-      variant_id: prev.variant_id || String(productVariantOptions[0]?.variant_id || ''),
-      planned_unit_price: prev.planned_unit_price || String(productVariantOptions[0]?.price || ''),
-    }));
+  function openOrderItemModal(itemOrOrderId = '') {
+    const item = typeof itemOrOrderId === 'object' ? itemOrOrderId : null;
+
+    if (item) {
+      setEditingOrderItemId(item.item_id);
+      setOrderItemForm(copyFields(item, defaultOrderItemForm));
+    } else {
+      const orderId = typeof itemOrOrderId === 'string' ? itemOrOrderId : '';
+      setEditingOrderItemId(null);
+      setOrderItemForm((prev) => ({
+        ...defaultOrderItemForm,
+        order_id: orderId || prev.order_id || String(orders[0]?.order_id || ''),
+        variant_id: prev.variant_id || String(productVariantOptions[0]?.variant_id || ''),
+        planned_unit_price: prev.planned_unit_price || String(productVariantOptions[0]?.price || ''),
+      }));
+    }
+
     setShowOrderItemModal(true);
   }
 
@@ -372,6 +517,12 @@ export default function App() {
     setShowMaterialModal(false);
     setEditingMaterialId(null);
     setMaterialForm(defaultMaterialForm);
+  }
+
+  function closeOrderItemModal() {
+    setShowOrderItemModal(false);
+    setEditingOrderItemId(null);
+    setOrderItemForm(defaultOrderItemForm);
   }
 
   function closePrintJobModal() {
@@ -422,10 +573,12 @@ export default function App() {
   async function submitOrderItem(e) {
     e.preventDefault();
     try {
-      await requestJson('/order-items', { method: 'POST', body: orderItemForm });
-      setMessage({ type: 'success', text: 'Order item created. You can now register a print job for its item_id.' });
-      setShowOrderItemModal(false);
-      setOrderItemForm(defaultOrderItemForm);
+      await requestJson(editingOrderItemId ? `/order-items/${editingOrderItemId}` : '/order-items', {
+        method: editingOrderItemId ? 'PUT' : 'POST',
+        body: orderItemForm,
+      });
+      setMessage({ type: 'success', text: `Order item ${editingOrderItemId ? 'updated' : 'created'}. You can now register a print job for its item_id.` });
+      closeOrderItemModal();
       await loadAllData();
       setTab('orders');
     } catch (error) {
@@ -468,13 +621,20 @@ export default function App() {
   async function confirmDelete() {
     if (!deleteTarget) return;
     try {
-      await fetch(`${API}${deleteTarget.path}/${deleteTarget.id}`, { method: 'DELETE' }).then(async (res) => {
+      const result = await fetch(`${API}${deleteTarget.path}/${deleteTarget.id}`, { method: 'DELETE' }).then(async (res) => {
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || `Could not delete ${deleteTarget.resource}.`);
+          const blockedMessage = res.status === 409
+            ? `Delete blocked: ${deleteTarget.label} is linked to other database records. Remove dependent records first, or archive/edit it when possible.`
+            : data.error || `Could not delete ${deleteTarget.resource}.`;
+          throw new Error(blockedMessage);
         }
+        return data;
       });
-      setMessage({ type: 'success', text: `${deleteTarget.label} deleted successfully.` });
+      setMessage({
+        type: 'success',
+        text: result.archived ? result.message : `${deleteTarget.label} deleted successfully.`,
+      });
       setDeleteTarget(null);
       await loadAllData();
     } catch (error) {
@@ -542,7 +702,7 @@ export default function App() {
                   </div>
                   <div className="panel">
                     <div className="panel-head"><div><h2 className="panel-title">Financial Snapshot</h2><p className="panel-subtitle">Quick estimates from product and line data.</p></div></div>
-                    <div className="cards-grid compact"><div className="mini-card"><h4>Catalog Base Value</h4><p className="metric">{formatMoney(totalProductValue)}</p></div><div className="mini-card"><h4>Planned Item Revenue</h4><p className="metric">{formatMoney(plannedRevenue)}</p></div></div>
+                    <div className="cards-grid compact"><div className="mini-card"><h4>Catalog Base Value</h4><p className="metric">{formatMoney(totalProductValue)}</p></div><div className="mini-card"><h4>Total Revenue</h4><p className="metric">{formatMoney(financeSummary.totalRevenue)}</p></div><div className="mini-card"><h4>Production Cost</h4><p className="metric">{formatMoney(financeSummary.totalProductionCost)}</p></div><div className="mini-card"><h4>Total Profit</h4><p className="metric">{formatMoney(financeSummary.totalProfit)}</p></div></div>
                   </div>
                 </section>
               </>
@@ -574,13 +734,16 @@ export default function App() {
             {!loading && tab === 'orders' && (
               <section className="panel">
                 <div className="panel-head"><div><h2 className="panel-title">Orders Management</h2><p className="panel-subtitle">Create orders, add order_items, then link print jobs.</p></div><input className="search" placeholder="Search orders" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
-                <div className="table-wrap"><table><thead><tr><th>Order</th><th>Client</th><th>Status</th><th>Payment</th><th>Date</th><th>Actions</th></tr></thead><tbody>
-                  {filteredOrders.map((item) => <tr key={item.order_id}><td><strong>#{item.order_id}</strong><span>{item.source_name || item.order_number || 'ERP order'}</span></td><td>Client #{item.client_id ?? '—'}</td><td><span className={getStatusBadge(item.status)}>{item.status || 'new'}</span></td><td><span className={getStatusBadge(item.payment_status)}>{item.payment_status || 'unpaid'}</span></td><td>{formatDate(item.order_date || item.created_at)}</td><td><div className="row-actions"><button className="inline-action" onClick={() => openOrderItemModal(String(item.order_id))}>Add item</button><button className="inline-action" onClick={() => openOrderModal(item)}>Edit</button><button className="inline-action danger" onClick={() => askDelete('order', '/orders', item.order_id, `Order #${item.order_id}`)}>Delete</button></div></td></tr>)}
+                <div className="table-wrap"><table><thead><tr><th>Order</th><th>Client</th><th>Status</th><th>Revenue</th><th>Production Cost</th><th>Profit</th><th>Margin</th><th>Actions</th></tr></thead><tbody>
+                  {filteredOrders.map((item) => {
+                    const finance = financeByOrderId.get(String(item.order_id)) || calculateOrderFinance(item, availableOrderItems, printJobs);
+                    return <tr key={item.order_id}><td><strong>#{item.order_id}</strong><span>{item.source_name || item.order_number || formatDate(item.order_date || item.created_at)}</span></td><td>Client #{item.client_id ?? '—'}</td><td><span className={getStatusBadge(item.status)}>{item.status || 'new'}</span><span>{item.payment_status || 'unpaid'}</span></td><td>{formatMoney(finance.revenue)}</td><td>{formatMoney(finance.productionCost)}</td><td><span className={getValueTone(finance.profit)}>{formatMoney(finance.profit)}</span></td><td><span className={getValueTone(finance.margin)}>{formatPercent(finance.margin)}</span></td><td><div className="row-actions"><button className="inline-action" onClick={() => openOrderItemModal(String(item.order_id))}>Add item</button><button className="inline-action" onClick={() => openOrderModal(item)}>Edit</button><button className="inline-action danger" onClick={() => askDelete('order', '/orders', item.order_id, `Order #${item.order_id}`)}>Delete</button></div></td></tr>;
+                  })}
                 </tbody></table>{filteredOrders.length === 0 && <div className="empty">No orders match your search.</div>}</div>
 
                 <div className="subsection-head"><h3>Order Items</h3><button className="btn btn-soft" onClick={() => openOrderItemModal()}>Add Order Item</button></div>
-                <div className="table-wrap"><table><thead><tr><th>Item ID</th><th>Order</th><th>Variant</th><th>Qty</th><th>Planned Price</th><th>Status</th><th>Action</th></tr></thead><tbody>
-                  {availableOrderItems.map((item) => <tr key={item.item_id}><td><strong>#{item.item_id}</strong></td><td>Order #{item.order_id}</td><td>Variant #{item.variant_id}</td><td>{item.quantity}</td><td>{formatMoney(item.planned_unit_price)}</td><td><span className={getStatusBadge(item.line_status)}>{item.line_status || 'planned'}</span></td><td><button className="inline-action" onClick={() => openPrintJobModal(String(item.item_id))}>Print</button></td></tr>)}
+                <div className="table-wrap"><table><thead><tr><th>Item ID</th><th>Order</th><th>Variant</th><th>Qty</th><th>Revenue</th><th>Cost</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+                  {availableOrderItems.map((item) => <tr key={item.item_id}><td><strong>#{item.item_id}</strong></td><td>Order #{item.order_id}</td><td>Variant #{item.variant_id}</td><td>{item.quantity}</td><td>{formatMoney(Number(item.quantity || 0) * Number(item.planned_unit_price || 0))}</td><td>{formatMoney(Number(item.quantity || 0) * Number(item.actual_unit_cost ?? item.planned_unit_cost ?? 0))}</td><td><span className={getStatusBadge(item.line_status)}>{item.line_status || 'planned'}</span></td><td><div className="row-actions"><button className="inline-action" onClick={() => openPrintJobModal(String(item.item_id))}>Print</button><button className="inline-action" onClick={() => openOrderItemModal(item)}>Edit</button><button className="inline-action danger" onClick={() => askDelete('order item', '/order-items', item.item_id, `Order item #${item.item_id}`)}>Delete</button></div></td></tr>)}
                 </tbody></table>{availableOrderItems.length === 0 && <div className="empty">No order_items loaded. Add an order item before registering print jobs.</div>}</div>
               </section>
             )}
@@ -595,10 +758,36 @@ export default function App() {
             )}
 
             {!loading && tab === 'finance' && (
-              <section className="panel">
-                <div className="panel-head"><div><h2 className="panel-title">Finance Overview</h2><p className="panel-subtitle">Simple project-level cost and revenue indicators.</p></div></div>
-                <div className="kpi-row"><div className="kpi-box"><h4>Catalog Value</h4><p>{formatMoney(totalProductValue)}</p></div><div className="kpi-box"><h4>Order Item Revenue</h4><p>{formatMoney(plannedRevenue)}</p></div><div className="kpi-box"><h4>Printer Wear / Hour</h4><p>{totalWearPerHour.toFixed(2)}</p></div></div>
-                <p className="footer-note">Detailed finance remains backend-driven; this view avoids changing database schema or routes.</p>
+              <section className="panel finance-report">
+                <div className="panel-head">
+                  <div><h2 className="panel-title">Finance Report</h2><p className="panel-subtitle">Revenue, production cost, expenses and profitability by period.</p></div>
+                  <div className="finance-filters">
+                    {[['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['all', 'All time'], ['custom', 'Custom']].map(([key, label]) => (
+                      <button key={key} aria-pressed={financePeriod === key} className={`period-btn ${financePeriod === key ? 'active' : ''}`} onClick={() => setFinancePeriod(key)} type="button">{label}</button>
+                    ))}
+                  </div>
+                </div>
+                {financePeriod === 'custom' && <div className="custom-range"><Field label="From"><input className="form-input" type="date" value={financeFrom} onChange={(e) => setFinanceFrom(e.target.value)} /></Field><Field label="To"><input className="form-input" type="date" value={financeTo} onChange={(e) => setFinanceTo(e.target.value)} /></Field></div>}
+                <p className="finance-period-label">Showing: {financePeriodLabel}</p>
+
+                <div className="finance-metrics">
+                  <div className="kpi-box"><h4>Total Revenue</h4><p>{formatMoney(financeSummary.totalRevenue)}</p></div>
+                  <div className="kpi-box"><h4>Production Cost</h4><p>{formatMoney(financeSummary.totalProductionCost)}</p></div>
+                  <div className="kpi-box"><h4>Recorded Expenses</h4><p>{formatMoney(financeSummary.expenseTotal)}</p></div>
+                  <div className="kpi-box"><h4>Net Profit Before Expenses</h4><p className={getValueTone(financeSummary.totalProfit)}>{formatMoney(financeSummary.totalProfit)}</p></div>
+                  <div className="kpi-box"><h4>Net Profit After Expenses</h4><p className={getValueTone(financeSummary.netProfit)}>{formatMoney(financeSummary.netProfit)}</p></div>
+                  <div className="kpi-box"><h4>Average Margin</h4><p>{formatPercent(financeSummary.averageMargin)}</p></div>
+                  <div className="kpi-box"><h4>Orders</h4><p>{financeSummary.orderCount}</p></div>
+                  <div className="kpi-box"><h4>Completed Print Jobs</h4><p>{financeSummary.completedJobs}</p></div>
+                </div>
+
+                <div className="subsection-head"><h3>Order Profitability</h3><span className="muted">Expenses are allocated by revenue share for report visibility.</span></div>
+                <div className="table-wrap finance-table"><table><thead><tr><th>Order ID</th><th>Date</th><th>Revenue</th><th>Production Cost</th><th>Expenses</th><th>Profit</th><th>Margin %</th></tr></thead><tbody>
+                  {financeReportRows.map((row) => <tr key={row.order.order_id}><td><strong>#{row.order.order_id}</strong></td><td>{formatDate(row.order.order_date || row.order.created_at)}</td><td>{formatMoney(row.revenue)}</td><td>{formatMoney(row.productionCost)}</td><td>{formatMoney(row.allocatedExpenses)}</td><td><span className={getValueTone(row.netProfit)}>{formatMoney(row.netProfit)}</span></td><td><span className={getValueTone(row.margin)}>{formatPercent(row.margin)}</span></td></tr>)}
+                </tbody></table>{financeReportRows.length === 0 && <div className="empty">No finance rows for this period yet. Values are shown as {formatMoney(0)}.</div>}</div>
+
+                {Object.keys(financeSummary.expensesByType).length > 0 && <div className="table-wrap finance-expenses"><table><thead><tr><th>Expense Type</th><th>Amount</th></tr></thead><tbody>{Object.entries(financeSummary.expensesByType).map(([type, amount]) => <tr key={type}><td>{type}</td><td>{formatMoney(amount)}</td></tr>)}</tbody></table></div>}
+                <p className="footer-note">Finance uses existing orders → order_items → print_jobs relationships and falls back to planned/actual item cost when no print job cost exists.</p>
               </section>
             )}
           </main>
@@ -653,7 +842,7 @@ export default function App() {
       )}
 
       {showOrderItemModal && (
-        <Modal title="Add Order Item" subtitle="Create the order_items row that print_jobs must reference." onClose={() => setShowOrderItemModal(false)}>
+        <Modal title={editingOrderItemId ? 'Edit Order Item' : 'Add Order Item'} subtitle="Create or update the order_items row that print_jobs must reference." onClose={closeOrderItemModal}>
           <form onSubmit={submitOrderItem}><div className="modal-body"><div className="form-grid">
             <Field label="Order"><select className="form-select" value={orderItemForm.order_id} onChange={(e) => updateForm(setOrderItemForm, 'order_id', e.target.value)} required><option value="">Select order</option>{orders.map((order) => <option value={order.order_id} key={order.order_id}>Order #{order.order_id} · Client #{order.client_id}</option>)}</select></Field>
             <Field label="Product Variant" hint="Uses variant_id; product_id is used only if your backend maps it."><select className="form-select" value={orderItemForm.variant_id} onChange={(e) => updateForm(setOrderItemForm, 'variant_id', e.target.value)} required><option value="">Select variant</option>{productVariantOptions.map((option) => <option value={option.variant_id} key={option.variant_id}>{option.label} · variant #{option.variant_id}</option>)}</select></Field>
@@ -662,14 +851,14 @@ export default function App() {
             <Field label="Planned Unit Cost"><input className="form-input" type="number" step="0.01" value={orderItemForm.planned_unit_cost} onChange={(e) => updateForm(setOrderItemForm, 'planned_unit_cost', e.target.value)} required /></Field>
             <Field label="Line Status"><select className="form-select" value={orderItemForm.line_status} onChange={(e) => updateForm(setOrderItemForm, 'line_status', e.target.value)}><option value="planned">planned</option><option value="queued">queued</option><option value="printing">printing</option><option value="ready">ready</option><option value="delivered">delivered</option><option value="cancelled">cancelled</option></select></Field>
             <Field label="Notes" className="full"><textarea className="form-textarea" rows="3" value={orderItemForm.notes} onChange={(e) => updateForm(setOrderItemForm, 'notes', e.target.value)} /></Field>
-          </div></div><div className="modal-actions"><button type="button" className="btn btn-soft" onClick={() => setShowOrderItemModal(false)}>Cancel</button><button type="submit" className="btn btn-primary">Create Order Item</button></div></form>
+          </div></div><div className="modal-actions"><button type="button" className="btn btn-soft" onClick={closeOrderItemModal}>Cancel</button><button type="submit" className="btn btn-primary">{editingOrderItemId ? 'Update Order Item' : 'Create Order Item'}</button></div></form>
         </Modal>
       )}
 
       {showPrintJobModal && (
         <Modal title={editingPrintJobId ? 'Edit Print Job' : 'Register Print Job'} subtitle="Link the job to order_items.item_id before choosing printer and costs." onClose={closePrintJobModal}>
           <form onSubmit={submitPrintJob}><div className="modal-body"><div className="relationship-note"><strong>Foreign key safety:</strong> this form sends <code>item_id</code> from an existing order item, not an order_id or product_id.</div><div className="form-grid">
-            <Field label="Order Item"><select className="form-select" value={printJobForm.item_id} onChange={(e) => updateForm(setPrintJobForm, 'item_id', e.target.value)} required><option value="">Select order item</option>{availableOrderItems.map((item) => <option value={item.item_id} key={item.item_id}>item_id #{item.item_id} · order #{item.order_id} · variant #{item.variant_id}</option>)}</select></Field>
+            <Field label="Order Item" hint={availableOrderItems.length === 0 ? 'No order items available. Create an order item before registering a print job.' : 'Select an existing order_items.item_id.'}><select className="form-select" value={printJobForm.item_id} onChange={(e) => updateForm(setPrintJobForm, 'item_id', e.target.value)} required><option value="">{availableOrderItems.length === 0 ? 'No order items available' : 'Select order item'}</option>{availableOrderItems.map((item) => <option value={item.item_id} key={item.item_id}>item_id #{item.item_id} · order #{item.order_id} · variant #{item.variant_id}</option>)}</select></Field>
             <Field label="Printer"><select className="form-select" value={printJobForm.printer_id} onChange={(e) => updateForm(setPrintJobForm, 'printer_id', e.target.value)} required><option value="">Select printer</option>{printers.map((printer) => <option value={printer.printer_id} key={printer.printer_id}>{printer.printer_name || `Printer #${printer.printer_id}`}</option>)}</select></Field>
             <Field label="Spool ID"><input className="form-input" type="number" value={printJobForm.spool_id} onChange={(e) => updateForm(setPrintJobForm, 'spool_id', e.target.value)} placeholder="Optional" /></Field>
             <Field label="Status"><select className="form-select" value={printJobForm.status} onChange={(e) => updateForm(setPrintJobForm, 'status', e.target.value)}><option value="queued">queued</option><option value="running">running</option><option value="done">done</option><option value="failed">failed</option><option value="cancelled">cancelled</option></select></Field>

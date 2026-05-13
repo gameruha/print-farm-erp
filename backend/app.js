@@ -105,12 +105,25 @@ async function updateResource(req, res, config) {
 }
 
 async function deleteResource(req, res, config) {
-  const [result] = await pool.query(`DELETE FROM \`${config.table}\` WHERE \`${config.id}\` = ?`, [req.params.id]);
-  if (result.affectedRows === 0) {
-    return res.status(404).json({ error: 'Record not found.' });
-  }
+  try {
+    const [result] = await pool.query(`DELETE FROM \`${config.table}\` WHERE \`${config.id}\` = ?`, [req.params.id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
 
-  return res.status(204).send();
+    return res.status(204).send();
+  } catch (error) {
+    if (config.table === 'products' && error?.code === 'ER_ROW_IS_REFERENCED_2') {
+      const [result] = await pool.query('UPDATE `products` SET `is_active` = 0 WHERE `product_id` = ?', [req.params.id]);
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ error: 'Record not found.' });
+      }
+
+      return res.json({ archived: true, message: 'Product is linked to other records, so it was archived instead of deleted.' });
+    }
+
+    throw error;
+  }
 }
 
 function asyncHandler(handler) {
@@ -130,6 +143,8 @@ for (const [path, config] of Object.entries(resources)) {
   app.delete(`/api/${path}/:id`, asyncHandler((req, res) => deleteResource(req, res, config)));
 }
 
+app.get('/api/order_items', asyncHandler((req, res) => listResource(req, res, resources['order-items'])));
+
 app.get('/api/printers', asyncHandler(async (req, res) => {
   const [rows] = await pool.query('SELECT * FROM `printers` ORDER BY `printer_id` DESC');
   res.json(rows);
@@ -143,6 +158,12 @@ app.get('/api/product-variants', asyncHandler(async (req, res) => {
     WHERE pv.is_active = 1
     ORDER BY pv.variant_id DESC
   `);
+  res.json(rows);
+}));
+
+
+app.get('/api/expenses', asyncHandler(async (req, res) => {
+  const [rows] = await pool.query('SELECT * FROM `expenses` ORDER BY `expense_date` DESC, `expense_id` DESC');
   res.json(rows);
 }));
 

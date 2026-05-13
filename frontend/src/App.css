@@ -54,7 +54,7 @@ button {
 
 .erp-shell {
   width: min(100%, 1600px);
-  margin: 0 auto;
+  margin: 0 auto;ф
 }
 
 .hero-card,
@@ -571,12 +571,14 @@ tr:hover td {
   align-items: center;
   justify-content: center;
   padding: 20px;
+  overflow: hidden;
   background: rgba(15, 23, 42, 0.52);
 }
 
 .modal {
   width: min(100%, 820px);
-  max-height: min(92vh, 920px);
+  max-height: min(90vh, calc(100vh - 40px));
+  max-height: min(90dvh, calc(100dvh - 40px));
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -585,8 +587,16 @@ tr:hover td {
   box-shadow: 0 26px 80px rgba(15, 23, 42, 0.26);
 }
 
+.modal > form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .modal-head {
   position: relative;
+  flex: 0 0 auto;
   padding: 22px 24px 16px;
   border-bottom: 1px solid #edf2f8;
 }
@@ -617,7 +627,10 @@ tr:hover td {
 }
 
 .modal-body {
-  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 22px 24px;
 }
 
@@ -666,9 +679,12 @@ tr:hover td {
 
 .modal-actions {
   display: flex;
+  flex: 0 0 auto;
   justify-content: flex-end;
   gap: 10px;
-  padding: 0 24px 24px;
+  padding: 16px 24px 24px;
+  border-top: 1px solid #edf2f8;
+  background: white;
 }
 
 @media (max-width: 1200px) {
@@ -725,6 +741,10 @@ tr:hover td {
     min-width: 0;
   }
 
+  .modal {
+    max-height: calc(100dvh - 24px);
+  }
+
   .modal-actions {
     flex-direction: column-reverse;
   }
@@ -762,4 +782,110 @@ tr:hover td {
 .delete-warning p {
   margin: 8px 0 0;
   color: #b91c1c;
+}
+
+.finance-positive {
+  color: #166534 !important;
+  font-weight: 900;
+}
+
+.finance-negative {
+  color: #b91c1c !important;
+  font-weight: 900;
+}
+
+.finance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.finance-expenses {
+  margin-top: 18px;
+}
+
+@media (max-width: 760px) {
+  .finance-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.finance-report {
+  gap: 18px;
+}
+
+.finance-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.period-btn {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 9px 12px;
+  background: white;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.period-btn.active {
+  background: #dbeafe;
+  color: var(--blue-dark);
+  border-color: #bfdbfe;
+}
+
+.custom-range {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 220px));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.finance-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.finance-neutral {
+  color: #64748b !important;
+  font-weight: 900;
+}
+
+.finance-table {
+  margin-top: 0;
+}
+
+@media (max-width: 1200px) {
+  .finance-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .finance-filters {
+    justify-content: flex-start;
+  }
+
+  .custom-range,
+  .finance-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
+.period-btn:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.28);
+  outline-offset: 2px;
+}
+
+.finance-period-label {
+  margin: -4px 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
 }
